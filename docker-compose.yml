@@ -1,0 +1,20 @@
+services:
+  leopic:
+    build: .
+    image: leopic:latest
+    container_name: imgbed-leopic
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18085:8080" # 服务器端口惯例 18xxx，18085 留给 imgbed
+    environment:
+      LEOPIC_BASE_URL: https://pic.leoreo.me
+      LEOPIC_PASSWORD: ${LEOPIC_PASSWORD:?请在 .env 中设置 LEOPIC_PASSWORD}
+      # 后台隐藏：未通过安全地址解锁时，页面与 API 一律 301 过去
+      LEOPIC_ADMIN_PATH: ${LEOPIC_ADMIN_PATH:-}
+      LEOPIC_ADMIN_REDIRECT: ${LEOPIC_ADMIN_REDIRECT:-}
+      # LEOPIC_EMAIL: you@example.com   # 设置后 POST /api/v1/tokens 要求 email 匹配
+    volumes:
+      # OpenResty 容器只挂载 /opt/1panel/www，静态目录必须在 www 树内（部署便签 §3.2）
+      - /opt/1panel/apps/imgbed/data:/data
+      - /opt/1panel/www/sites/pic.leoreo.me/img:/data/uploads
+      - /opt/1panel/www/sites/pic.leoreo.me/webp:/data/webp

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leopic</title>
+<script src="/theme.js"></script>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+
+<main id="login" class="login" hidden>
+  <form id="login-form" class="login-card">
+    <h1>leopic</h1>
+    <label for="password" class="sr-only">密码</label>
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password" required autofocus>
+    <button type="submit">登录</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</main>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <span class="brand">leopic</span>
+    <label for="search" class="sr-only">搜索</label>
+    <input id="search" type="search" placeholder="搜索文件名或 key">
+    <span id="count" class="muted"></span>
+    <button id="btn-view" class="ghost icon" type="button"></button>
+    <button id="btn-theme" class="ghost icon" type="button"></button>
+    <button id="btn-settings" class="ghost" type="button">设置</button>
+    <button id="btn-logout" class="ghost" type="button">退出</button>
+  </header>
+
+  <section id="drop" class="drop" tabindex="0" role="button" aria-label="上传图片：点击选择、拖拽或粘贴">
+    <input id="file" type="file" accept="image/*" multiple hidden>
+    <p>拖拽、粘贴或<strong>点击</strong>上传图片</p>
+    <ul id="queue" class="queue"></ul>
+  </section>
+
+  <div id="bar" class="bar" role="toolbar" aria-label="批量操作" aria-hidden="true">
+    <span id="bar-count"></span>
+    <button id="bar-copy" class="ghost" type="button">复制链接 ▾</button>
+    <button id="bar-dl" class="ghost" type="button">下载原图</button>
+    <button id="bar-dl-webp" class="ghost" type="button">下载 WebP</button>
+    <button id="bar-delete" class="danger" type="button">删除</button>
+    <button id="bar-clear" class="ghost" type="button">取消选择</button>
+  </div>
+
+  <main>
+    <p class="hint muted">右键复制链接 · Ctrl / Shift 点击多选 · 空白处拖动框选 · Ctrl+A 全选 · Delete 删除</p>
+    <div id="list-head" class="list-head" hidden>
+      <span>文件</span>
+      <span>尺寸</span>
+      <button type="button" data-sort="size" data-label="大小"></button>
+      <button type="button" data-sort="date" data-label="时间"></button>
+      <span>Key</span>
+    </div>
+    <ul id="grid" class="grid"></ul>
+    <p id="empty" class="muted center" hidden>还没有图片</p>
+    <div class="center"><button id="more" class="ghost" type="button" hidden>加载更多</button></div>
+  </main>
+</div>
+
+<div id="marquee" class="marquee" hidden></div>
+<form id="dl-form" method="post" action="/api/admin/download" target="dl-frame" hidden></form>
+<iframe id="dl-frame" name="dl-frame" title="下载" hidden></iframe>
+
+<ul id="ctx" class="ctx" role="menu" aria-label="图片操作" hidden></ul>
+
+<dialog id="detail" class="drawer">
+  <div class="drawer-head">
+    <h2 id="d-title"></h2>
+    <button class="ghost close" type="button" data-close aria-label="关闭">✕</button>
+  </div>
+  <a id="d-open" target="_blank" rel="noopener"><img id="d-img" alt=""></a>
+  <dl id="d-meta" class="meta"></dl>
+  <div id="d-links" class="links"></div>
+  <div class="drawer-foot">
+    <button id="d-download" class="ghost" type="button">下载原图</button>
+    <button id="d-delete" class="danger" type="button">删除</button>
+  </div>
+</dialog>
+
+<dialog id="settings" class="drawer">
+  <div class="drawer-head">
+    <h2>设置</h2>
+    <button class="ghost close" type="button" data-close aria-label="关闭">✕</button>
+  </div>
+  <h3>默认复制</h3>
+  <select id="copy-default" aria-label="上传后自动复制">
+    <option value="">不自动复制</option>
+    <option value="url">原图 URL</option>
+    <option value="markdown">原图 Markdown</option>
+    <option value="webp">WebP URL</option>
+    <option value="webp_markdown">WebP Markdown</option>
+  </select>
+  <h3>API Token</h3>
+  <form id="token-form" class="row">
+    <label for="token-name" class="sr-only">Token 名称</label>
+    <input id="token-name" placeholder="名称，如 python 脚本" maxlength="64">
+    <button type="submit">新建</button>
+  </form>
+  <div id="token-new" class="token-new" hidden>
+    <p class="muted">只显示这一次，请保存：</p>
+    <code id="token-value"></code>
+    <button id="token-copy" class="ghost" type="button">复制</button>
+  </div>
+  <ul id="tokens" class="tokens"></ul>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

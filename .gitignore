@@ -1,0 +1,8 @@
+.env
+*.db
+*.db-*
+/leopic
+/leopic.exe
+*.exe~
+/data/
+.video_agent/
