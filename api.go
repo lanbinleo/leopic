@@ -62,6 +62,8 @@ type links struct {
 	ThumbnailURL     string `json:"thumbnail_url"`
 	Webp             string `json:"webp"`
 	WebpMarkdown     string `json:"webp_markdown"`
+	Clean            string `json:"clean,omitempty"` // 无水印 WebP，仅在生成过时出现
+	CleanMarkdown    string `json:"clean_markdown,omitempty"`
 }
 
 func (s *Server) links(m *Image) links {
@@ -71,6 +73,11 @@ func (s *Server) links(m *Image) links {
 		wp = s.cfg.BaseURL + s.cfg.WebpPrefix + "/" + webpRel(m)
 	}
 	n := displayName(m)
+	var clean, cleanMD string
+	if m.CleanName != "" {
+		clean = s.cfg.BaseURL + s.cfg.WebpPrefix + "/" + cleanRel(m)
+		cleanMD = "![" + n + "](" + clean + ")"
+	}
 	return links{
 		URL:              u,
 		HTML:             fmt.Sprintf(`<img src="%s" alt="%s" title="%s" />`, u, n, n),
@@ -80,6 +87,8 @@ func (s *Server) links(m *Image) links {
 		ThumbnailURL:     wp,
 		Webp:             wp,
 		WebpMarkdown:     "![" + n + "](" + wp + ")",
+		Clean:            clean,
+		CleanMarkdown:    cleanMD,
 	}
 }
 
@@ -126,6 +135,7 @@ type listItem struct {
 	Links      links   `json:"links"`
 	WebpSize   float64 `json:"webp_size"`
 	Watermark  bool    `json:"watermark"`
+	CleanSize  float64 `json:"clean_size"`
 }
 
 func humanDate(t time.Time) string {
@@ -177,6 +187,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/admin/regen", s.auth(s.handleStartRegen))
 	mux.HandleFunc("GET /api/admin/regen", s.auth(s.handleRegenStatus))
 	mux.HandleFunc("POST /api/admin/images/{key}/watermark", s.auth(s.handleSetWatermark))
+	mux.HandleFunc("POST /api/admin/images/clean", s.auth(s.handleMakeClean))
+	mux.HandleFunc("POST /api/admin/images/clean/delete", s.auth(s.handleDeleteClean))
 	mux.HandleFunc("GET /api/admin/session", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		ok(w, "success", map[string]any{"base_url": s.cfg.BaseURL})
 	}))
@@ -368,7 +380,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			Key: m.Key, Name: m.Name, OriginName: m.OriginName, Size: kb(m.Size), Mimetype: m.Mimetype,
 			Extension: m.Extension, MD5: m.MD5, SHA1: m.SHA1, Width: m.Width, Height: m.Height,
 			HumanDate: humanDate(t), Date: t.Format("2006-01-02 15:04:05"), Pathname: m.Pathname(),
-			Links: s.links(m), WebpSize: kb(m.WebpSize), Watermark: m.Watermark,
+			Links: s.links(m), WebpSize: kb(m.WebpSize), Watermark: m.Watermark, CleanSize: kb(m.CleanSize),
 		})
 	}
 	ok(w, "success", s.page(r, page, per, total, items))

@@ -194,3 +194,77 @@ func (s *Server) handleSetWatermark(w http.ResponseWriter, r *http.Request) {
 	}
 	ok(w, "已更新", map[string]any{"watermark": m.Watermark, "webp_size": kb(m.WebpSize), "links": s.links(m)})
 }
+
+// cleanItem 是无水印版操作后返回给前端的单张状态。
+type cleanItem struct {
+	Key       string  `json:"key"`
+	CleanSize float64 `json:"clean_size"`
+	Links     links   `json:"links"`
+	Error     string  `json:"error,omitempty"`
+}
+
+func readKeys(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	var body struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil || len(body.Keys) == 0 {
+		fail(w, 200, "请选择图片")
+		return nil, false
+	}
+	if len(body.Keys) > maxBatch {
+		fail(w, 200, fmt.Sprintf("一次最多 %d 张", maxBatch))
+		return nil, false
+	}
+	return body.Keys, true
+}
+
+// handleMakeClean：JSON {keys}，逐张生成无水印版（已有则按当前设置重建），单张失败不影响其余。
+func (s *Server) handleMakeClean(w http.ResponseWriter, r *http.Request) {
+	keys, good := readKeys(w, r)
+	if !good {
+		return
+	}
+	list, err := s.store.byKeys(keys)
+	if err != nil {
+		fail(w, 200, "服务异常，请稍后再试")
+		return
+	}
+	items := []cleanItem{}
+	failed := 0
+	for _, m := range list {
+		it := cleanItem{Key: m.Key}
+		if err := s.store.makeClean(m); err != nil {
+			failed++
+			it.Error = "生成失败"
+			if err == errNoClean {
+				it.Error = err.Error()
+			} else {
+				fmt.Fprintf(os.Stderr, "clean %s: %v\n", m.Key, err)
+			}
+		}
+		it.CleanSize, it.Links = kb(m.CleanSize), s.links(m)
+		items = append(items, it)
+	}
+	ok(w, "success", map[string]any{"items": items, "failed": failed})
+}
+
+func (s *Server) handleDeleteClean(w http.ResponseWriter, r *http.Request) {
+	keys, good := readKeys(w, r)
+	if !good {
+		return
+	}
+	list, err := s.store.byKeys(keys)
+	if err != nil {
+		fail(w, 200, "服务异常，请稍后再试")
+		return
+	}
+	items := []cleanItem{}
+	for _, m := range list {
+		if err := s.store.removeClean(m); err != nil {
+			fail(w, 200, "服务异常，请稍后再试")
+			return
+		}
+		items = append(items, cleanItem{Key: m.Key, Links: s.links(m)})
+	}
+	ok(w, "success", map[string]any{"items": items})
+}

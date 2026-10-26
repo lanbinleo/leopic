@@ -357,6 +357,7 @@ button:disabled { opacity: .55; cursor: default; filter: none; }
 .nomark input { accent-color: var(--accent); }
 #detail .switch { margin-bottom: 4px; font-size: 13px; }
 #sentinel { height: 1px; }
+.clean .note { margin: 0 0 8px; }
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; z-index: 60;

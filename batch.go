@@ -47,6 +47,9 @@ func (s *Store) deleteMany(keys []string) (int, error) {
 	for _, m := range gone {
 		os.Remove(s.originalPath(m))
 		os.Remove(s.webpPath(m))
+		if m.CleanName != "" {
+			os.Remove(s.cleanPath(m))
+		}
 	}
 	return len(gone), nil
 }
@@ -151,7 +154,8 @@ func attachment(name string) string {
 	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, url.PathEscape(name))
 }
 
-// handleDownload：表单 POST，字段 key（可重复）与 variant（original | webp）。
+// handleDownload：表单 POST，字段 key（可重复）与 variant（original | webp | clean）。
+// clean 只打包已生成无水印版的图，其余回落带水印的 WebP。
 // 单张直接返回文件，多张流式打包为 zip（Store 不压缩，图片本身已压缩）。
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -164,7 +168,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 200, fmt.Sprintf("请选择 1 到 %d 张图片", maxBatch))
 		return
 	}
-	webp := r.PostForm.Get("variant") == "webp"
+	variant := r.PostForm.Get("variant")
+	webp := variant == "webp" || variant == "clean"
 	list, err := s.store.byKeys(keys)
 	if err != nil || len(list) == 0 {
 		fail(w, 200, "图片不存在")
@@ -179,7 +184,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	var entries []entry
 	for _, m := range list {
 		p, n := s.store.originalPath(m), downloadName(m, false)
-		if webp && m.WebpSize > 0 {
+		if variant == "clean" && m.CleanName != "" {
+			p, n = s.store.cleanPath(m), downloadName(m, true)
+		} else if webp && m.WebpSize > 0 {
 			p, n = s.store.webpPath(m), downloadName(m, true)
 		}
 		entries = append(entries, entry{p, names.take(n), time.Unix(m.CreatedAt, 0)})

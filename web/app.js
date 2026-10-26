@@ -72,7 +72,13 @@ const KINDS = [
   ['webp', 'WebP URL'],
   ['webp_markdown', 'WebP Markdown'],
   ['html', 'HTML'],
+  ['clean', '无水印 URL'],
+  ['clean_markdown', '无水印 Markdown'],
 ];
+// 无水印版按需生成，没有时不出现在复制选项里。
+const hasClean = (item) => !!item?.links.clean;
+const kindsFor = (items) => KINDS.filter(([k]) => !k.startsWith('clean') || items.some(hasClean));
+const BATCH_KINDS = ['url', 'markdown', 'webp', 'webp_markdown', 'clean', 'clean_markdown'];
 
 function linkOf(item, kind) {
   if (kind === 'html') return `<img src="${item.links.url}" alt="${displayName(item).replace(/"/g, '&quot;')}">`;
@@ -306,8 +312,67 @@ async function deleteKeys(keys) {
 
 function copyKeys(keys, kind) {
   const label = KINDS.find(([k]) => k === kind)[1];
-  const text = keys.map((k) => linkOf(state.items.get(k), kind)).join('\n');
-  copy(text, keys.length > 1 ? `${keys.length} 条${label}` : label);
+  // 无水印链接只复制已生成的，其余跳过并提示。
+  const items = keys.map((k) => state.items.get(k)).filter((it) => !kind.startsWith('clean') || hasClean(it));
+  if (!items.length) {
+    toast('选中的图片都还没有无水印版');
+    return;
+  }
+  const text = items.map((it) => linkOf(it, kind)).join('\n');
+  const skipped = keys.length - items.length;
+  copy(text, (items.length > 1 ? `${items.length} 条${label}` : label) + (skipped ? `（${skipped} 张未生成，已跳过）` : ''));
+}
+
+// ---------- 无水印版 ----------
+
+// 合并服务端返回的单张状态（links / clean_size）到本地缓存，并刷新打开着的详情。
+function mergeClean(items) {
+  for (const it of items) {
+    const item = state.items.get(it.key);
+    if (!item) continue;
+    item.links = it.links;
+    item.clean_size = it.clean_size;
+  }
+  if ($('#detail').open && state.current && items.some((it) => it.key === state.current.key)) renderDetailLinks(state.current);
+}
+
+// 分批请求，便于显示进度；单张失败不影响其余。
+async function makeClean(keys) {
+  keys = keys.filter((k) => state.items.get(k)?.extension !== 'gif');
+  if (!keys.length) {
+    toast('GIF 没有 WebP 衍生图，无法生成无水印版');
+    return;
+  }
+  const CHUNK = 10;
+  let done = 0;
+  let failed = 0;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    if (keys.length > CHUNK) toast(`正在生成无水印版 ${done} / ${keys.length}…`);
+    try {
+      const data = await api('POST', '/api/admin/images/clean', { keys: keys.slice(i, i + CHUNK) });
+      mergeClean(data.items);
+      failed += data.failed;
+    } catch (err) {
+      toast(err.message);
+      return;
+    }
+    done = Math.min(keys.length, i + CHUNK);
+  }
+  const ok = keys.length - failed;
+  toast(failed ? `已生成 ${ok} 张，${failed} 张失败` : keys.length > 1 ? `已生成 ${ok} 张无水印版` : '已生成无水印版');
+}
+
+async function deleteClean(keys) {
+  keys = keys.filter((k) => hasClean(state.items.get(k)));
+  if (!keys.length) return;
+  const msg = keys.length === 1 ? '删除这张的无水印版？' : `删除 ${keys.length} 张的无水印版？`;
+  if (!confirm(`${msg}\n引用无水印链接的页面将失效；带水印的 WebP 与原图不受影响。`)) return;
+  try {
+    mergeClean((await api('POST', '/api/admin/images/clean/delete', { keys })).items);
+    toast('已删除无水印版');
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 // 通过隐藏表单提交到 iframe：浏览器直接流式下载，不占页面内存。
@@ -462,10 +527,16 @@ document.addEventListener('keydown', (e) => {
 
 $('#bar-copy').addEventListener('click', (e) => {
   const r = e.currentTarget.getBoundingClientRect();
-  openMenu(KINDS.slice(0, 4).map(([kind, label]) => [`复制${label}`, () => copyKeys(selectedKeys(), kind)]), r.left, r.bottom + 6, e.currentTarget);
+  const keys = selectedKeys();
+  const kinds = kindsFor(keys.map((k) => state.items.get(k))).filter(([k]) => BATCH_KINDS.includes(k));
+  openMenu(kinds.map(([kind, label]) => [`复制${label}`, () => copyKeys(keys, kind)]), r.left, r.bottom + 6, e.currentTarget);
 });
 $('#bar-dl').addEventListener('click', () => download(selectedKeys(), 'original'));
 $('#bar-dl-webp').addEventListener('click', () => download(selectedKeys(), 'webp'));
+$('#bar-clean').addEventListener('click', (e) => {
+  const r = e.currentTarget.getBoundingClientRect();
+  openMenu(cleanMenu(selectedKeys()), r.left, r.bottom + 6, e.currentTarget);
+});
 $('#bar-delete').addEventListener('click', () => deleteKeys(selectedKeys()));
 $('#bar-clear').addEventListener('click', clearSelection);
 
@@ -509,15 +580,36 @@ function openMenu(entries, x, y, owner) {
 }
 
 function itemMenu(item) {
+  const clean = item.extension === 'gif' ? [] : hasClean(item)
+    ? [['下载无水印 WebP', () => download([item.key], 'clean')]]
+    : [['生成无水印 WebP', () => makeClean([item.key])]];
   return [
-    ...KINDS.map(([kind, label]) => [`复制${label}`, () => copyKeys([item.key], kind)]),
+    ...kindsFor([item]).map(([kind, label]) => [`复制${label}`, () => copyKeys([item.key], kind)]),
     null,
     ['新标签打开原图', () => window.open(item.links.url, '_blank', 'noopener')],
     ['下载原图', () => download([item.key], 'original')],
+    ...clean,
     ['查看详情', () => openDetail(item)],
     null,
     ['删除', () => deleteKeys([item.key]), 'danger'],
   ];
+}
+
+// 批量无水印操作：底栏「无水印版 ▾」与批量右键菜单共用。
+function cleanMenu(keys) {
+  const n = keys.length;
+  const have = keys.filter((k) => hasClean(state.items.get(k))).length;
+  const entries = [[`为 ${n} 张生成无水印版`, () => makeClean(keys)]];
+  if (have) {
+    entries.push(
+      [`复制 ${have} 条无水印 URL`, () => copyKeys(keys, 'clean')],
+      [`复制 ${have} 条无水印 Markdown`, () => copyKeys(keys, 'clean_markdown')],
+      [`下载 ${have} 张无水印 WebP`, () => download(keys.filter((k) => hasClean(state.items.get(k))), 'clean')],
+      null,
+      [`删除 ${have} 张的无水印版`, () => deleteClean(keys), 'danger'],
+    );
+  }
+  return entries;
 }
 
 function batchMenu() {
@@ -527,6 +619,8 @@ function batchMenu() {
     null,
     [`下载 ${n} 张原图`, () => download(selectedKeys(), 'original')],
     [`下载 ${n} 张 WebP`, () => download(selectedKeys(), 'webp')],
+    null,
+    ...cleanMenu(selectedKeys()),
     null,
     ['取消选择', clearSelection],
     [`删除 ${n} 张`, () => deleteKeys(selectedKeys()), 'danger'],
@@ -693,13 +787,37 @@ function openDetail(item) {
     ['路径', item.pathname],
   ];
   $('#d-meta').replaceChildren(...meta.flatMap(([k, v]) => [el('dt', { text: k }), el('dd', { text: v })]));
-  $('#d-links').replaceChildren(...KINDS.map(([kind, label]) => linkRow(label.replace('Markdown', 'MD'), linkOf(item, kind))));
+  renderDetailLinks(item);
   const mark = $('#d-mark');
   mark.checked = item.watermark !== false;
   mark.disabled = item.extension === 'gif';
   mark.parentElement.title = mark.disabled ? 'GIF 没有 WebP 衍生图' : '';
   $('#detail').showModal();
 }
+
+// 链接区与「无水印 WebP」区随无水印版生成 / 删除刷新。
+function renderDetailLinks(item) {
+  $('#d-links').replaceChildren(...kindsFor([item]).map(([kind, label]) => linkRow(label.replace('Markdown', 'MD'), linkOf(item, kind))));
+  const gif = item.extension === 'gif';
+  const have = hasClean(item);
+  $('#d-clean-state').textContent = gif
+    ? 'GIF 没有 WebP 衍生图。'
+    : have
+      ? `已生成（${fmtSize(item.clean_size)}），链接见上方。改了质量后「重新生成」，链接不变。`
+      : '和公开 WebP 一样压缩，但不画可见水印（保留 Meta 署名）。链接带随机串，猜不到。';
+  $('#d-clean-make').hidden = gif;
+  $('#d-clean-make').textContent = have ? '重新生成' : '生成';
+  $('#d-clean-dl').hidden = !have;
+  $('#d-clean-del').hidden = !have;
+}
+
+$('#d-clean-make').addEventListener('click', async (e) => {
+  if (!state.current) return;
+  e.target.disabled = true;
+  try { await makeClean([state.current.key]); } finally { e.target.disabled = false; }
+});
+$('#d-clean-dl').addEventListener('click', () => state.current && download([state.current.key], 'clean'));
+$('#d-clean-del').addEventListener('click', () => state.current && deleteClean([state.current.key]));
 
 $('#d-mark').addEventListener('change', async (e) => {
   const item = state.current;

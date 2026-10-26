@@ -63,6 +63,18 @@ func (s *Store) webpPath(m *Image) string {
 	return filepath.Join(s.cfg.WebpDir, filepath.FromSlash(webpRel(m)))
 }
 
+// cleanRel 是无水印版相对路径：与衍生图同目录，文件名带随机串防止从衍生图 URL 猜出。
+func cleanRel(m *Image) string {
+	if m.Path == "" {
+		return m.CleanName
+	}
+	return m.Path + "/" + m.CleanName
+}
+
+func (s *Store) cleanPath(m *Image) string {
+	return filepath.Join(s.cfg.WebpDir, filepath.FromSlash(cleanRel(m)))
+}
+
 const keyChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 func randomString(n int) string {
@@ -213,11 +225,11 @@ func (s *Store) writeNew(m *Image, data []byte, t time.Time) error {
 
 var webpSem = make(chan struct{}, 2)
 
-// webpOpts 按当前设置与该图的水印开关组装参数。
-func (s *Store) webpOpts(m *Image) webpOpts {
+// webpOpts 按当前设置与该图的水印开关组装参数。clean=true 时不画可见水印（Meta 照写）。
+func (s *Store) webpOpts(m *Image, clean bool) webpOpts {
 	st, a := s.settings(), s.currentAssets()
 	o := webpOpts{quality: st.WebpQuality, maxEdge: st.WebpMaxEdge}
-	if st.Watermark.Enabled && m.Watermark {
+	if st.Watermark.Enabled && m.Watermark && !clean {
 		o.mk = &marker{st: st.Watermark, font: a.font, icon: a.icon}
 	}
 	if st.Meta.Enabled {
@@ -229,25 +241,49 @@ func (s *Store) webpOpts(m *Image) webpOpts {
 
 func (s *Store) writeWebP(m *Image, data []byte, f format) error {
 	webpSem <- struct{}{}
-	out, err := makeWebP(data, f, s.webpOpts(m))
+	out, err := makeWebP(data, f, s.webpOpts(m, false))
 	<-webpSem
 	if err != nil || out == nil {
 		m.WebpSize = 0
 		return err
 	}
-	p := s.webpPath(m)
+	if err := writeAtomic(s.webpPath(m), out); err != nil {
+		return err
+	}
+	m.WebpSize = int64(len(out))
+	return nil
+}
+
+// writeClean 生成无水印版。GIF 没有衍生图，返回 errNoClean。
+func (s *Store) writeClean(m *Image, data []byte, f format) error {
+	if f.ext == "gif" {
+		return errNoClean
+	}
+	webpSem <- struct{}{}
+	out, err := makeWebP(data, f, s.webpOpts(m, true))
+	<-webpSem
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(s.cleanPath(m), out); err != nil {
+		return err
+	}
+	m.CleanSize = int64(len(out))
+	return nil
+}
+
+func writeAtomic(p string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	m.WebpSize = int64(len(out))
 	return nil
 }
 
@@ -295,10 +331,61 @@ func (s *Store) rebuild(m *Image) error {
 		return err
 	}
 	werr := s.writeWebP(m, data, f)
-	if _, err := s.db.Exec("UPDATE images SET webp_size=? WHERE id=?", m.WebpSize, m.ID); err != nil {
+	if m.CleanName != "" {
+		if err := s.writeClean(m, data, f); err != nil && werr == nil {
+			werr = err
+		}
+	}
+	if _, err := s.db.Exec("UPDATE images SET webp_size=?, clean_size=? WHERE id=?", m.WebpSize, m.CleanSize, m.ID); err != nil {
 		return errDB{err}
 	}
 	return werr
+}
+
+var errNoClean = errors.New("GIF 没有 WebP 衍生图，无法生成无水印版")
+
+// makeClean 为单张生成（已有则按当前设置重建）无水印版，文件名首次生成后固定，链接不变。
+func (s *Store) makeClean(m *Image) error {
+	data, err := os.ReadFile(s.originalPath(m))
+	if err != nil {
+		return err
+	}
+	f, err := sniff(data)
+	if err != nil {
+		return err
+	}
+	fresh := m.CleanName == ""
+	if fresh {
+		stem := strings.TrimSuffix(m.Name, filepath.Ext(m.Name))
+		m.CleanName = stem + "-" + randomString(10) + ".webp"
+	}
+	if err := s.writeClean(m, data, f); err != nil {
+		if fresh {
+			m.CleanName = ""
+		}
+		return err
+	}
+	if _, err := s.db.Exec("UPDATE images SET clean_name=?, clean_size=? WHERE id=?", m.CleanName, m.CleanSize, m.ID); err != nil {
+		if fresh {
+			os.Remove(s.cleanPath(m))
+			m.CleanName, m.CleanSize = "", 0
+		}
+		return errDB{err}
+	}
+	return nil
+}
+
+// removeClean 删除无水印版文件与记录。
+func (s *Store) removeClean(m *Image) error {
+	if m.CleanName == "" {
+		return nil
+	}
+	if _, err := s.db.Exec("UPDATE images SET clean_name='', clean_size=0 WHERE id=?", m.ID); err != nil {
+		return errDB{err}
+	}
+	os.Remove(s.cleanPath(m))
+	m.CleanName, m.CleanSize = "", 0
+	return nil
 }
 
 // setWatermark 切换单张的水印开关并立即重建它的衍生图。

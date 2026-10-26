@@ -44,6 +44,7 @@
     <button id="bar-copy" class="ghost" type="button">复制链接 ▾</button>
     <button id="bar-dl" class="ghost" type="button">下载原图</button>
     <button id="bar-dl-webp" class="ghost" type="button">下载 WebP</button>
+    <button id="bar-clean" class="ghost" type="button">无水印版 ▾</button>
     <button id="bar-delete" class="danger" type="button">删除</button>
     <button id="bar-clear" class="ghost" type="button">取消选择</button>
   </div>
@@ -79,6 +80,15 @@
   <dl id="d-meta" class="meta"></dl>
   <label class="switch"><input id="d-mark" type="checkbox"> WebP 加水印</label>
   <div id="d-links" class="links"></div>
+  <section class="clean" aria-labelledby="d-clean-title">
+    <h3 id="d-clean-title">无水印 WebP</h3>
+    <p id="d-clean-state" class="muted note"></p>
+    <div class="row">
+      <button id="d-clean-make" class="ghost" type="button">生成</button>
+      <button id="d-clean-dl" class="ghost" type="button" hidden>下载</button>
+      <button id="d-clean-del" class="danger" type="button" hidden>删除</button>
+    </div>
+  </section>
   <div class="drawer-foot">
     <button id="d-download" class="ghost" type="button">下载原图</button>
     <button id="d-delete" class="danger" type="button">删除</button>

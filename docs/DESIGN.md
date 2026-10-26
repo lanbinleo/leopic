@@ -86,6 +86,13 @@ GET /webp/*  ──► alias  {DATA}/webp/         WebP 衍生图
 - 单张跳过：`images.watermark=0` 的图不画可见水印（Meta 照写）。上传时 `watermark=0`，或在详情里切换（立即重建该张）；全量重建尊重该开关。
 - 改了水印 / 质量后老图不会自动更新，需要重建；衍生图 URL 不变，CDN 需 purge `/webp/*`。
 
+### 5.2 无水印版（按需）
+
+- 公开衍生图照常带水印；需要干净压缩图时，在详情 / 右键 / 批量菜单里「生成无水印版」，只为点过的图多存一份。
+- 与衍生图同目录（OpenResty 无需改），文件名 `{stem}-{10位随机}.webp`，存于 `images.clean_name`；随机串防止从带水印 URL 猜出。首次生成后文件名固定，重新生成 / 全量重建链接不变。
+- 压缩参数同衍生图，不画可见水印，Meta 照写。GIF 不支持。
+- 删图时一并删除；也可单独删除（链接随即 404）。
+
 ## 6. 数据库
 
 ```sql
@@ -106,6 +113,8 @@ CREATE TABLE images (
   webp_size   INTEGER NOT NULL DEFAULT 0,  -- 0 = 无衍生图
   created_at  INTEGER NOT NULL,            -- Unix 秒
   watermark   INTEGER NOT NULL DEFAULT 1,  -- 0 = 衍生图不加可见水印（旧库启动时自动补列）
+  clean_name  TEXT    NOT NULL DEFAULT '', -- 无水印版文件名，空 = 未生成（§5.2）
+  clean_size  INTEGER NOT NULL DEFAULT 0,
   UNIQUE (path, name)
 );
 CREATE INDEX images_created ON images(created_at);
@@ -211,12 +220,14 @@ query：`page`（默认 1）、`order`（`newest` 默认 / `earliest` / `utmost`
 | POST | `/api/admin/tokens` | `{"name"}` → `{"token":"id|plain"}`（明文只返回这一次） |
 | DELETE | `/api/admin/tokens/{id}` | 吊销 |
 | POST | `/api/admin/images/delete` | JSON `{"keys":[...]}`，单事务批量删除，返回 `{"deleted":n}`；上限 1000 |
-| POST | `/api/admin/download` | 表单 `key`（可重复）+ `variant`（`original`/`webp`）。单张直接返回文件，多张流式 zip（Store 不压缩）；文件名用原始文件名，重名追加 ` (2)` |
+| POST | `/api/admin/download` | 表单 `key`（可重复）+ `variant`（`original`/`webp`/`clean`；`clean` 对未生成的图回落带水印 WebP）。单张直接返回文件，多张流式 zip（Store 不压缩）；文件名用原始文件名，重名追加 ` (2)` |
 | GET / PUT | `/api/admin/settings` | 读 / 存设置。返回 `{settings, defaults, custom_font, has_icon}`，PUT 校验失败返回中文原因 |
 | POST | `/api/admin/settings/preview` | JSON `{settings, key?}`，用未保存的设置渲染预览 WebP（无 key 用内置渐变样图） |
 | POST / DELETE | `/api/admin/assets/{icon\|font}` | 上传（multipart `file`）/ 删除水印图标或自定义字体 |
 | GET | `/api/admin/assets/icon` | 当前图标 |
 | POST / GET | `/api/admin/regen` | 启动全量重建 / 查询进度 `{running, done, total, ok, error, started, ended}` |
+| POST | `/api/admin/images/clean` | JSON `{"keys":[...]}`，生成 / 重建无水印版，返回 `{items:[{key,clean_size,links,error?}], failed}`；单张失败不影响其余 |
+| POST | `/api/admin/images/clean/delete` | JSON `{"keys":[...]}`，删除无水印版 |
 | POST | `/api/admin/images/{key}/watermark` | `{"watermark":"true\|false"}`，切换并立即重建该张 |
 | GET | `/api/admin/session` | 登录态检查，返回 `base_url` |
 | GET | `/healthz` | `ok` |
@@ -231,7 +242,8 @@ query：`page`（默认 1）、`order`（`newest` 默认 / `earliest` / `utmost`
 - 上传区：多文件 2 路并发；失败的（网络 / 服务异常，非格式或大小错误）全部结束后再逐张重试一次。「本次不加水印」开关。
 - 图片网格：WebP 预览（`loading="lazy"`），文件名、日期、大小；无限滚动（IntersectionObserver，提前 800px），「加载更多」按钮兜底。
 - 详情抽屉：大图预览、尺寸 / 大小 / 原名 / 日期；一键复制 原图 URL、原图 Markdown、WebP URL、WebP Markdown、HTML；删除（二次确认）。
-- 详情抽屉：「WebP 加水印」开关（GIF 禁用）。
+- 详情抽屉：「WebP 加水印」开关（GIF 禁用）；「无水印 WebP」区：生成 / 重新生成 / 下载 / 删除，生成后链接区多出无水印 URL / MD。批量栏「无水印版 ▾」与批量右键菜单可批量生成、复制、下载、删除。
+- `links` 扩展字段 `clean`、`clean_markdown` 仅在生成过时出现；列表项另有 `clean_size`（KB）。
 
 ### 9.1 设置（三个页签）
 

@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS images (
   webp_size   INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   watermark   INTEGER NOT NULL DEFAULT 1,
+  clean_name  TEXT    NOT NULL DEFAULT '',
+  clean_size  INTEGER NOT NULL DEFAULT 0,
   UNIQUE (path, name)
 );
 CREATE INDEX IF NOT EXISTS images_created ON images(created_at);
@@ -51,13 +53,20 @@ CREATE TABLE IF NOT EXISTS settings (
 
 // migrate 给旧库补列。
 func migrate(db *sql.DB) error {
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('images') WHERE name='watermark'").Scan(&n); err != nil {
-		return err
+	cols := []struct{ name, def string }{
+		{"watermark", "INTEGER NOT NULL DEFAULT 1"},
+		{"clean_name", "TEXT NOT NULL DEFAULT ''"},
+		{"clean_size", "INTEGER NOT NULL DEFAULT 0"},
 	}
-	if n == 0 {
-		if _, err := db.Exec("ALTER TABLE images ADD COLUMN watermark INTEGER NOT NULL DEFAULT 1"); err != nil {
+	for _, c := range cols {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('images') WHERE name=?", c.name).Scan(&n); err != nil {
 			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec("ALTER TABLE images ADD COLUMN " + c.name + " " + c.def); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -99,17 +108,19 @@ type Image struct {
 	Height     int
 	WebpSize   int64
 	CreatedAt  int64
-	Watermark  bool // false = 该图衍生图不加可见水印
+	Watermark  bool   // false = 该图衍生图不加可见水印
+	CleanName  string // 无水印版文件名（含随机串），空 = 没有
+	CleanSize  int64
 }
 
-const imageCols = "id,key,path,name,origin_name,size,mimetype,extension,md5,sha1,sha256,width,height,webp_size,created_at,watermark"
+const imageCols = "id,key,path,name,origin_name,size,mimetype,extension,md5,sha1,sha256,width,height,webp_size,created_at,watermark,clean_name,clean_size"
 
 type scanner interface{ Scan(...any) error }
 
 func scanImage(sc scanner) (*Image, error) {
 	var m Image
 	err := sc.Scan(&m.ID, &m.Key, &m.Path, &m.Name, &m.OriginName, &m.Size, &m.Mimetype, &m.Extension,
-		&m.MD5, &m.SHA1, &m.SHA256, &m.Width, &m.Height, &m.WebpSize, &m.CreatedAt, &m.Watermark)
+		&m.MD5, &m.SHA1, &m.SHA256, &m.Width, &m.Height, &m.WebpSize, &m.CreatedAt, &m.Watermark, &m.CleanName, &m.CleanSize)
 	if err != nil {
 		return nil, err
 	}
