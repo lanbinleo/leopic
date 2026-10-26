@@ -38,6 +38,12 @@ type Store struct {
 	cfg *Config
 	db  *sql.DB
 	mu  sync.Mutex // 串行化写入：去重检查 + 落盘 + 入库
+
+	setMu  sync.RWMutex // 保护 st / assets
+	st     Settings
+	assets wmAssets
+
+	job regenJob
 }
 
 func (s *Store) originalPath(m *Image) string {
@@ -103,11 +109,13 @@ type ingestReq struct {
 	Key        string
 	Path       string
 	Name       string
+	NoMark     bool // 衍生图不加可见水印
 }
 
 // ingest 校验、去重、落盘、生成衍生图并入库。去重命中时返回已有记录和 errDuplicate。
 func (s *Store) ingest(r ingestReq) (*Image, error) {
-	if int64(len(r.Data)) > s.cfg.MaxSize {
+	st := s.settings()
+	if int64(len(r.Data)) > st.maxSize() {
 		return nil, errTooLarge
 	}
 	f, err := sniff(r.Data)
@@ -118,7 +126,7 @@ func (s *Store) ingest(r ingestReq) (*Image, error) {
 	if w == 0 || h == 0 {
 		return nil, errUnsupported
 	}
-	if w*h > s.cfg.MaxPixels {
+	if w*h > st.MaxPixels {
 		return nil, errTooMany
 	}
 	md5sum, sha1sum, sha256sum := hashes(r.Data)
@@ -139,7 +147,7 @@ func (s *Store) ingest(r ingestReq) (*Image, error) {
 		Key: r.Key, Path: r.Path, Name: r.Name, OriginName: r.OriginName,
 		Size: int64(len(r.Data)), Mimetype: f.mime, Extension: f.ext,
 		MD5: md5sum, SHA1: sha1sum, SHA256: sha256sum, Width: w, Height: h,
-		CreatedAt: r.CreatedAt.Unix(),
+		CreatedAt: r.CreatedAt.Unix(), Watermark: !r.NoMark,
 	}
 
 	created := false
@@ -205,9 +213,23 @@ func (s *Store) writeNew(m *Image, data []byte, t time.Time) error {
 
 var webpSem = make(chan struct{}, 2)
 
+// webpOpts 按当前设置与该图的水印开关组装参数。
+func (s *Store) webpOpts(m *Image) webpOpts {
+	st, a := s.settings(), s.currentAssets()
+	o := webpOpts{quality: st.WebpQuality, maxEdge: st.WebpMaxEdge}
+	if st.Watermark.Enabled && m.Watermark {
+		o.mk = &marker{st: st.Watermark, font: a.font, icon: a.icon}
+	}
+	if st.Meta.Enabled {
+		meta := st.Meta
+		o.meta = &meta
+	}
+	return o
+}
+
 func (s *Store) writeWebP(m *Image, data []byte, f format) error {
 	webpSem <- struct{}{}
-	out, err := makeWebP(data, f, s.cfg.WebpQuality, s.cfg.WebpMaxEdge)
+	out, err := makeWebP(data, f, s.webpOpts(m))
 	<-webpSem
 	if err != nil || out == nil {
 		m.WebpSize = 0
@@ -235,10 +257,10 @@ func (s *Store) insert(m *Image) error {
 		if key == "" || i > 0 {
 			key = randomString(6 + i/5)
 		}
-		res, err := s.db.Exec(`INSERT INTO images (key,path,name,origin_name,size,mimetype,extension,md5,sha1,sha256,width,height,webp_size,created_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		res, err := s.db.Exec(`INSERT INTO images (key,path,name,origin_name,size,mimetype,extension,md5,sha1,sha256,width,height,webp_size,created_at,watermark)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			key, m.Path, m.Name, m.OriginName, m.Size, m.Mimetype, m.Extension, m.MD5, m.SHA1, m.SHA256,
-			m.Width, m.Height, m.WebpSize, m.CreatedAt)
+			m.Width, m.Height, m.WebpSize, m.CreatedAt, m.Watermark)
 		if err != nil {
 			if strings.Contains(err.Error(), "images.key") {
 				continue
@@ -257,8 +279,39 @@ func (s *Store) delete(key string) error {
 	return err
 }
 
-// regen 补生成（或 all=true 时重建）衍生图。
-func (s *Store) regen(all bool) (int, error) {
+// errDB 包装数据库错误，regen 遇到它就中止（单张图的问题只跳过）。
+type errDB struct{ error }
+
+func (e errDB) Unwrap() error { return e.error }
+
+// rebuild 按当前设置重新生成单张衍生图并更新 webp_size。
+func (s *Store) rebuild(m *Image) error {
+	data, err := os.ReadFile(s.originalPath(m))
+	if err != nil {
+		return err
+	}
+	f, err := sniff(data)
+	if err != nil {
+		return err
+	}
+	werr := s.writeWebP(m, data, f)
+	if _, err := s.db.Exec("UPDATE images SET webp_size=? WHERE id=?", m.WebpSize, m.ID); err != nil {
+		return errDB{err}
+	}
+	return werr
+}
+
+// setWatermark 切换单张的水印开关并立即重建它的衍生图。
+func (s *Store) setWatermark(m *Image, on bool) error {
+	if _, err := s.db.Exec("UPDATE images SET watermark=? WHERE id=?", on, m.ID); err != nil {
+		return errDB{err}
+	}
+	m.Watermark = on
+	return s.rebuild(m)
+}
+
+// regen 补生成（或 all=true 时重建）衍生图。progress 可为 nil，每处理一张回调一次。
+func (s *Store) regen(all bool, progress func(done, total int)) (int, error) {
 	rows, err := s.db.Query("SELECT " + imageCols + " FROM images ORDER BY id")
 	if err != nil {
 		return 0, err
@@ -274,28 +327,82 @@ func (s *Store) regen(all bool) (int, error) {
 	}
 	rows.Close()
 	n := 0
-	for _, m := range list {
+	for i, m := range list {
+		if progress != nil {
+			progress(i, len(list))
+		}
 		if !all && m.WebpSize > 0 {
 			if _, err := os.Stat(s.webpPath(m)); err == nil {
 				continue
 			}
 		}
-		data, err := os.ReadFile(s.originalPath(m))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "跳过 %s: %v\n", m.Pathname(), err)
-			continue
-		}
-		f, err := sniff(data)
-		if err != nil {
-			continue
-		}
-		if err := s.writeWebP(m, data, f); err != nil {
+		if err := s.rebuild(m); err != nil {
 			fmt.Fprintf(os.Stderr, "webp %s: %v\n", m.Pathname(), err)
-		}
-		if _, err := s.db.Exec("UPDATE images SET webp_size=? WHERE id=?", m.WebpSize, m.ID); err != nil {
-			return n, err
+			if errors.As(err, new(errDB)) {
+				return n, err
+			}
+			continue
 		}
 		n++
 	}
+	if progress != nil {
+		progress(len(list), len(list))
+	}
 	return n, nil
+}
+
+// regenJob 是管理页触发的后台全量重建，同一时间只跑一个。
+type regenJob struct {
+	mu      sync.Mutex
+	running bool
+	done    int
+	total   int
+	ok      int
+	err     string
+	started int64
+	ended   int64
+}
+
+type regenStatus struct {
+	Running bool   `json:"running"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+	OK      int    `json:"ok"`
+	Error   string `json:"error"`
+	Started int64  `json:"started"`
+	Ended   int64  `json:"ended"`
+}
+
+func (s *Store) regenStatus() regenStatus {
+	j := &s.job
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return regenStatus{j.running, j.done, j.total, j.ok, j.err, j.started, j.ended}
+}
+
+// startRegen 启动后台重建；已在跑时返回 false。
+func (s *Store) startRegen(all bool) bool {
+	j := &s.job
+	j.mu.Lock()
+	if j.running {
+		j.mu.Unlock()
+		return false
+	}
+	j.running, j.done, j.total, j.ok, j.err = true, 0, 0, 0, ""
+	j.started, j.ended = time.Now().Unix(), 0
+	j.mu.Unlock()
+	go func() {
+		n, err := s.regen(all, func(done, total int) {
+			j.mu.Lock()
+			j.done, j.total = done, total
+			j.mu.Unlock()
+		})
+		j.mu.Lock()
+		j.running, j.ok, j.ended = false, n, time.Now().Unix()
+		if err != nil {
+			j.err = err.Error()
+		}
+		j.mu.Unlock()
+	}()
+	return true
 }

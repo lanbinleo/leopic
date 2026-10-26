@@ -125,6 +125,7 @@ type listItem struct {
 	Pathname   string  `json:"pathname"`
 	Links      links   `json:"links"`
 	WebpSize   float64 `json:"webp_size"`
+	Watermark  bool    `json:"watermark"`
 }
 
 func humanDate(t time.Time) string {
@@ -167,6 +168,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/tokens/{id}", s.auth(s.handleRevokeToken))
 	mux.HandleFunc("POST /api/admin/images/delete", s.auth(s.handleBatchDelete))
 	mux.HandleFunc("POST /api/admin/download", s.auth(s.handleDownload))
+	mux.HandleFunc("GET /api/admin/settings", s.auth(s.handleGetSettings))
+	mux.HandleFunc("PUT /api/admin/settings", s.auth(s.handlePutSettings))
+	mux.HandleFunc("POST /api/admin/settings/preview", s.auth(s.handlePreview))
+	mux.HandleFunc("POST /api/admin/assets/{name}", s.auth(s.handleUploadAsset))
+	mux.HandleFunc("DELETE /api/admin/assets/{name}", s.auth(s.handleDeleteAsset))
+	mux.HandleFunc("GET /api/admin/assets/icon", s.auth(s.handleGetIcon))
+	mux.HandleFunc("POST /api/admin/regen", s.auth(s.handleStartRegen))
+	mux.HandleFunc("GET /api/admin/regen", s.auth(s.handleRegenStatus))
+	mux.HandleFunc("POST /api/admin/images/{key}/watermark", s.auth(s.handleSetWatermark))
 	mux.HandleFunc("GET /api/admin/session", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		ok(w, "success", map[string]any{"base_url": s.cfg.BaseURL})
 	}))
@@ -248,7 +258,8 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 // ---------- 上传 ----------
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxSize+(1<<20))
+	maxSize := s.store.settings().maxSize()
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize+(1<<20))
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
@@ -265,12 +276,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, s.cfg.MaxSize+1))
+	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
 	if err != nil {
 		fail(w, 200, "服务异常，请稍后再试")
 		return
 	}
-	m, err := s.store.ingest(ingestReq{Data: data, OriginName: cleanName(hdr.Filename)})
+	noMark := r.FormValue("watermark") == "0" || r.FormValue("watermark") == "false"
+	m, err := s.store.ingest(ingestReq{Data: data, OriginName: cleanName(hdr.Filename), NoMark: noMark})
 	dup := errors.Is(err, errDuplicate)
 	if err != nil && !dup {
 		switch err {
@@ -356,7 +368,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			Key: m.Key, Name: m.Name, OriginName: m.OriginName, Size: kb(m.Size), Mimetype: m.Mimetype,
 			Extension: m.Extension, MD5: m.MD5, SHA1: m.SHA1, Width: m.Width, Height: m.Height,
 			HumanDate: humanDate(t), Date: t.Format("2006-01-02 15:04:05"), Pathname: m.Pathname(),
-			Links: s.links(m), WebpSize: kb(m.WebpSize),
+			Links: s.links(m), WebpSize: kb(m.WebpSize), Watermark: m.Watermark,
 		})
 	}
 	ok(w, "success", s.page(r, page, per, total, items))
@@ -413,7 +425,7 @@ func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
 	var used int64
 	s.store.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(size),0) FROM images").Scan(&n, &used)
 	ok(w, "success", map[string]any{
-		"name": "leopic", "avatar": "", "email": s.cfg.Email, "capacity": 0,
+		"name": "leopic", "avatar": "", "email": s.store.settings().Email, "capacity": 0,
 		"used_capacity": kb(used), "url": s.cfg.BaseURL, "image_num": n, "album_num": 0, "registered_ip": "",
 	})
 }
@@ -443,7 +455,7 @@ func (s *Server) checkPassword(w http.ResponseWriter, email, password string, ch
 		return false
 	}
 	good := constEq(password, s.cfg.Password)
-	if checkEmail && s.cfg.Email != "" && !strings.EqualFold(strings.TrimSpace(email), s.cfg.Email) {
+	if want := s.store.settings().Email; checkEmail && want != "" && !strings.EqualFold(strings.TrimSpace(email), want) {
 		good = false
 	}
 	if !good {

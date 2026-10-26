@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS images (
   height      INTEGER NOT NULL DEFAULT 0,
   webp_size   INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
+  watermark   INTEGER NOT NULL DEFAULT 1,
   UNIQUE (path, name)
 );
 CREATE INDEX IF NOT EXISTS images_created ON images(created_at);
@@ -41,7 +42,26 @@ CREATE TABLE IF NOT EXISTS sessions (
   id_hash    TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `
+
+// migrate 给旧库补列。
+func migrate(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('images') WHERE name='watermark'").Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		if _, err := db.Exec("ALTER TABLE images ADD COLUMN watermark INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func openDB(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -53,6 +73,10 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -75,16 +99,17 @@ type Image struct {
 	Height     int
 	WebpSize   int64
 	CreatedAt  int64
+	Watermark  bool // false = 该图衍生图不加可见水印
 }
 
-const imageCols = "id,key,path,name,origin_name,size,mimetype,extension,md5,sha1,sha256,width,height,webp_size,created_at"
+const imageCols = "id,key,path,name,origin_name,size,mimetype,extension,md5,sha1,sha256,width,height,webp_size,created_at,watermark"
 
 type scanner interface{ Scan(...any) error }
 
 func scanImage(sc scanner) (*Image, error) {
 	var m Image
 	err := sc.Scan(&m.ID, &m.Key, &m.Path, &m.Name, &m.OriginName, &m.Size, &m.Mimetype, &m.Extension,
-		&m.MD5, &m.SHA1, &m.SHA256, &m.Width, &m.Height, &m.WebpSize, &m.CreatedAt)
+		&m.MD5, &m.SHA1, &m.SHA256, &m.Width, &m.Height, &m.WebpSize, &m.CreatedAt, &m.Watermark)
 	if err != nil {
 		return nil, err
 	}

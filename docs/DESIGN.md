@@ -12,7 +12,7 @@
 - 记录级去重：同内容重复上传直接返回已有记录。
 - 从 lsky 的 SQLite 一次性导入（含孤儿文件、旧 token），文件结构不变。
 
-不做：多用户 / 注册、相册、游客上传、`/s/{key}` 短链（lsky 2.1 源码里不存在该路由）、原图保护 `/{key}.{ext}`、防盗链（交给 Cloudflare）、上传时改写原图（压缩 / 水印 / 转格式）。
+不做：多用户 / 注册、相册、游客上传、`/s/{key}` 短链（lsky 2.1 源码里不存在该路由）、原图保护 `/{key}.{ext}`、防盗链（交给 Cloudflare）、上传时改写原图（压缩 / 水印 / 转格式；水印只加在衍生图上，见 §5.1）、盲水印。
 
 ## 2. 架构
 
@@ -42,13 +42,22 @@ GET /webp/*  ──► alias  {DATA}/webp/         WebP 衍生图
 | `LEOPIC_IMG_PREFIX` | `/img` | 原图 URL 前缀 |
 | `LEOPIC_WEBP_PREFIX` | `/webp` | 衍生图 URL 前缀 |
 | `LEOPIC_PASSWORD` | 必填 | 管理端登录密码，也用于 `POST /api/v1/tokens` |
-| `LEOPIC_EMAIL` | 空 | 设置后 `POST /api/v1/tokens` 要求 email 匹配 |
 | `LEOPIC_ADMIN_PATH` | 空 | 后台隐藏：安全地址（如 `/knock-x7k9`）。访问该地址种 cookie 解锁；未解锁时页面与 API 一律 301 到 `LEOPIC_ADMIN_REDIRECT`。图片直链（`/img/` `/i/` `/webp/`）与 `/healthz` 不受影响。留空则不隐藏（本地开发） |
 | `LEOPIC_ADMIN_REDIRECT` | 空 | 未解锁时的 301 跳转目标（如 `https://leoreo.me`），设 `ADMIN_PATH` 时必填。跳转带 `Cache-Control: no-cache`，解锁后浏览器不会被钉死的 301 卡住 |
-| `LEOPIC_MAX_SIZE_MB` | `50` | 单文件上限 |
-| `LEOPIC_MAX_PIXELS` | `50000000` | 像素上限（防解压炸弹） |
-| `LEOPIC_WEBP_QUALITY` | `82` | WebP 质量 |
-| `LEOPIC_WEBP_MAX_EDGE` | `2560` | 衍生图最长边，超过才缩，不放大 |
+| `LEOPIC_ASSETS_DIR` | `{DATA}/assets` | 水印图标 / 自定义字体 |
+
+环境变量只保留启动前必须确定、改错会锁死后台或断链的项。其余参数在管理页「设置」里改，存于 `settings` 表（见 §9.1）：
+
+| 设置 | 推荐值 | 说明 |
+|---|---|---|
+| WebP 质量 | `82` | |
+| 最长边 | `2560` | 衍生图最长边，超过才缩，不放大 |
+| 单文件上限 | `50` MB | |
+| 像素上限 | `50000000` | 防解压炸弹 |
+| 邮箱 | 空 | 设置后 `POST /api/v1/tokens` 要求 email 匹配 |
+| 水印 / Meta | 见 §5.1 | |
+
+旧版的 `LEOPIC_MAX_SIZE_MB` `LEOPIC_MAX_PIXELS` `LEOPIC_WEBP_QUALITY` `LEOPIC_WEBP_MAX_EDGE` `LEOPIC_EMAIL`：库里还没有设置时（首次启动）导入一次，之后以库为准，仍设置时启动日志提示已不生效。
 
 ## 4. 存储与命名
 
@@ -66,7 +75,16 @@ GET /webp/*  ──► alias  {DATA}/webp/         WebP 衍生图
 - GIF 不生成衍生图（保动画），`webp` 相关链接回落为原图。
 - 衍生图不含 EXIF（顺带去掉 GPS 等隐私信息）；原图原样保存。
 - 编码并发限制为 2，避免内存峰值。
-- `leopic regen [--all]`：补生成缺失的衍生图；`--all` 强制全部重建（调参后用）。
+- `leopic regen [--all]`：补生成缺失的衍生图；`--all` 强制全部重建（调参后用）。管理页「高级」也可触发全量重建（后台运行、显示进度，同一时间只跑一个）。
+
+### 5.1 水印（只作用于衍生图）
+
+- 原图不动、不另存一份，磁盘仍是「原图 + 一张 WebP」。代价：原图直链本身无水印。
+- 可见水印：缩放后、编码前画上。白字 + 淡阴影，默认文字 `@子夜集 leoreo.me`、右下、不透明度 35%、字号为短边 2.4%、边距 2%；短边 < 400px 不加，放不下不加。类型可选 文字 / 图标 / 图标 + 文字。
+- 字体：内嵌 Noto Sans SC Medium 的 GB2312 + ASCII + 常用标点子集（约 2MB，OFL，`fonts/OFL.txt`）；可在管理页上传 TTF/OTF 覆盖（`{ASSETS}/font`），生僻字靠它补。图标上传后统一转存 `{ASSETS}/icon.png`。
+- Meta 水印：在 WebP 里写 EXIF（Software=leopic、Artist、Copyright，UTF-8）与 XMP（`dc:creator`、`dc:rights`）。简单格式 WebP 会补 VP8X 头。可被轻易删除，只作署名。
+- 单张跳过：`images.watermark=0` 的图不画可见水印（Meta 照写）。上传时 `watermark=0`，或在详情里切换（立即重建该张）；全量重建尊重该开关。
+- 改了水印 / 质量后老图不会自动更新，需要重建；衍生图 URL 不变，CDN 需 purge `/webp/*`。
 
 ## 6. 数据库
 
@@ -87,6 +105,7 @@ CREATE TABLE images (
   height      INTEGER NOT NULL DEFAULT 0,
   webp_size   INTEGER NOT NULL DEFAULT 0,  -- 0 = 无衍生图
   created_at  INTEGER NOT NULL,            -- Unix 秒
+  watermark   INTEGER NOT NULL DEFAULT 1,  -- 0 = 衍生图不加可见水印（旧库启动时自动补列）
   UNIQUE (path, name)
 );
 CREATE INDEX images_created ON images(created_at);
@@ -102,6 +121,11 @@ CREATE TABLE tokens (
 CREATE TABLE sessions (
   id_hash    TEXT PRIMARY KEY,             -- sha256(cookie 值)
   expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE settings (
+  key   TEXT PRIMARY KEY,                  -- 目前只有 "app"
+  value TEXT NOT NULL                      -- Settings 的 JSON
 );
 ```
 
@@ -124,7 +148,7 @@ CREATE TABLE sessions (
 
 ### 8.2 `POST /api/v1/upload`
 
-multipart 字段 `file`（必填）；`strategy_id` 等其他字段接受但忽略。
+multipart 字段 `file`（必填）；扩展字段 `watermark=0` 表示该图衍生图不加可见水印；`strategy_id` 等其他字段接受但忽略。
 
 成功（含去重命中）：
 ```json
@@ -188,6 +212,12 @@ query：`page`（默认 1）、`order`（`newest` 默认 / `earliest` / `utmost`
 | DELETE | `/api/admin/tokens/{id}` | 吊销 |
 | POST | `/api/admin/images/delete` | JSON `{"keys":[...]}`，单事务批量删除，返回 `{"deleted":n}`；上限 1000 |
 | POST | `/api/admin/download` | 表单 `key`（可重复）+ `variant`（`original`/`webp`）。单张直接返回文件，多张流式 zip（Store 不压缩）；文件名用原始文件名，重名追加 ` (2)` |
+| GET / PUT | `/api/admin/settings` | 读 / 存设置。返回 `{settings, defaults, custom_font, has_icon}`，PUT 校验失败返回中文原因 |
+| POST | `/api/admin/settings/preview` | JSON `{settings, key?}`，用未保存的设置渲染预览 WebP（无 key 用内置渐变样图） |
+| POST / DELETE | `/api/admin/assets/{icon\|font}` | 上传（multipart `file`）/ 删除水印图标或自定义字体 |
+| GET | `/api/admin/assets/icon` | 当前图标 |
+| POST / GET | `/api/admin/regen` | 启动全量重建 / 查询进度 `{running, done, total, ok, error, started, ended}` |
+| POST | `/api/admin/images/{key}/watermark` | `{"watermark":"true\|false"}`，切换并立即重建该张 |
 | GET | `/api/admin/session` | 登录态检查，返回 `base_url` |
 | GET | `/healthz` | `ok` |
 
@@ -198,9 +228,16 @@ query：`page`（默认 1）、`order`（`newest` 默认 / `earliest` / `utmost`
 - 登录页：只有密码框。
 - 顶栏：搜索框、设置。
 - 上传区：拖拽 / 粘贴 / 点选，多文件顺序上传，显示进度与结果。
-- 图片网格：WebP 预览（`loading="lazy"`），文件名、日期、大小；“加载更多”分页。
+- 上传区：多文件 2 路并发；失败的（网络 / 服务异常，非格式或大小错误）全部结束后再逐张重试一次。「本次不加水印」开关。
+- 图片网格：WebP 预览（`loading="lazy"`），文件名、日期、大小；无限滚动（IntersectionObserver，提前 800px），「加载更多」按钮兜底。
 - 详情抽屉：大图预览、尺寸 / 大小 / 原名 / 日期；一键复制 原图 URL、原图 Markdown、WebP URL、WebP Markdown、HTML；删除（二次确认）。
-- 设置：token 列表 / 新建 / 吊销；默认复制格式（localStorage）。
+- 详情抽屉：「WebP 加水印」开关（GIF 禁用）。
+
+### 9.1 设置（三个页签）
+
+- 常用：默认复制格式（localStorage）、token 列表 / 新建 / 吊销。
+- 水印：可见水印参数、图标 / 字体上传、Meta 字段，实时预览（可填 key 用真实图片）。
+- 高级：WebP 质量、最长边、上传上限、邮箱，每项标推荐值，可一键填回推荐值；全量重建衍生图。不常碰的参数放这里，避免误改。
 - 所有用户内容（文件名等）一律以 textContent 渲染，防 XSS。
 
 ## 10. 命令行

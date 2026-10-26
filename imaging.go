@@ -50,30 +50,65 @@ func decodeConfig(data []byte) (int, int) {
 	return cfg.Width, cfg.Height
 }
 
+// webpOpts 是生成衍生图的参数；mk / meta 为 nil 表示不加。
+type webpOpts struct {
+	quality, maxEdge int
+	mk               *marker
+	meta             *MetaSettings
+}
+
+func decodeImage(data []byte, f format) (image.Image, error) {
+	if f.ext == "webp" {
+		return webp.Decode(bytes.NewReader(data))
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	return img, err
+}
+
 // makeWebP 生成衍生图。GIF 返回 nil（保留动画，回落原图）。
-func makeWebP(data []byte, f format, quality, maxEdge int) ([]byte, error) {
+func makeWebP(data []byte, f format, o webpOpts) ([]byte, error) {
 	if f.ext == "gif" {
 		return nil, nil
 	}
-	var img image.Image
-	var err error
-	if f.ext == "webp" {
-		img, err = webp.Decode(bytes.NewReader(data))
-	} else {
-		img, _, err = image.Decode(bytes.NewReader(data))
-	}
+	img, err := decodeImage(data, f)
 	if err != nil {
 		return nil, err
 	}
 	if f.ext == "jpg" {
 		img = applyOrientation(img, jpegOrientation(data))
 	}
-	img = fit(img, maxEdge)
+	return encodeNRGBA(fit(img, o.maxEdge), o)
+}
+
+// encodeNRGBA 画水印、编码 WebP、写入元数据。img 已缩放到位。
+func encodeNRGBA(img image.Image, o webpOpts) ([]byte, error) {
+	if o.mk != nil {
+		n := toNRGBA(img)
+		if err := o.mk.apply(n); err != nil {
+			return nil, err
+		}
+		img = n
+	}
 	var buf bytes.Buffer
-	if err := webp.Encode(&buf, img, webp.Options{Quality: quality, Method: 4}); err != nil {
+	if err := webp.Encode(&buf, img, webp.Options{Quality: o.quality, Method: 4}); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	if o.meta == nil {
+		return buf.Bytes(), nil
+	}
+	b := img.Bounds()
+	return addWebPMeta(buf.Bytes(), buildEXIF(o.meta), buildXMP(o.meta), b.Dx(), b.Dy())
+}
+
+// toNRGBA 返回可写的 NRGBA；已是 NRGBA 且原点为 0 时直接复用。
+func toNRGBA(img image.Image) *image.NRGBA {
+	if n, ok := img.(*image.NRGBA); ok && n.Rect.Min == (image.Point{}) {
+		return n
+	}
+	b := img.Bounds()
+	n := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(n, n.Bounds(), img, b.Min, draw.Src)
+	return n
 }
 
 func fit(img image.Image, maxEdge int) image.Image {
@@ -158,18 +193,20 @@ func tiffOrientation(t []byte) int {
 	return 1
 }
 
+// applyOrientation 先转成 NRGBA 再按字节搬像素，避免逐像素 At/Set 的接口开销。
 func applyOrientation(img image.Image, o int) image.Image {
 	if o <= 1 || o > 8 {
 		return img
 	}
-	b := img.Bounds()
-	w, h := b.Dx(), b.Dy()
+	src := toNRGBA(img)
+	w, h := src.Rect.Dx(), src.Rect.Dy()
 	dw, dh := w, h
 	if o >= 5 {
 		dw, dh = h, w
 	}
 	dst := image.NewNRGBA(image.Rect(0, 0, dw, dh))
 	for y := 0; y < h; y++ {
+		row := src.Pix[y*src.Stride : y*src.Stride+w*4]
 		for x := 0; x < w; x++ {
 			var dx, dy int
 			switch o {
@@ -188,7 +225,7 @@ func applyOrientation(img image.Image, o int) image.Image {
 			case 8:
 				dx, dy = y, w-1-x
 			}
-			dst.Set(dx, dy, img.At(b.Min.X+x, b.Min.Y+y))
+			copy(dst.Pix[dy*dst.Stride+dx*4:dy*dst.Stride+dx*4+4], row[x*4:x*4+4])
 		}
 	}
 	return dst

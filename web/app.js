@@ -245,10 +245,21 @@ async function load(page) {
   } finally {
     state.loading = false;
   }
+  // 一页填不满屏幕时哨兵一直可见，IO 不会再触发，这里补一次。
+  const r = $('#sentinel').getBoundingClientRect();
+  if (state.page < state.last && r.top < innerHeight + 800) loadMore();
 }
 
 const reload = () => load(1);
-$('#more').addEventListener('click', () => load(state.page + 1));
+const loadMore = () => { if (state.page < state.last) load(state.page + 1); };
+$('#more').addEventListener('click', loadMore);
+
+// 无限滚动：哨兵进入视口前 800px 就拉下一页；按钮保留作兜底（键盘 / 不支持 IO 时）。
+if ('IntersectionObserver' in window) {
+  new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting) && !$('#app').hidden && !state.loading) loadMore();
+  }, { rootMargin: '800px 0px' }).observe($('#sentinel'));
+}
 
 let searchTimer;
 $('#search').addEventListener('input', (e) => {
@@ -568,11 +579,11 @@ const drop = $('#drop');
 const fileInput = $('#file');
 
 drop.addEventListener('click', (e) => {
-  if (e.target.closest('.queue')) return;
+  if (e.target.closest('.queue, .nomark')) return;
   fileInput.click();
 });
 drop.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' || e.key === ' ') {
+  if (e.target === drop && (e.key === 'Enter' || e.key === ' ')) {
     e.preventDefault();
     fileInput.click();
   }
@@ -596,36 +607,56 @@ document.addEventListener('paste', (e) => {
   if (files.length) uploadAll(files);
 });
 
+const UPLOAD_CONCURRENCY = 2;
+
+async function uploadOne(r, noMark) {
+  r.st.textContent = '上传中…';
+  r.st.classList.remove('err');
+  const fd = new FormData();
+  fd.append('file', r.f, r.f.name || 'paste.png');
+  if (noMark) fd.append('watermark', '0');
+  try {
+    r.data = await api('POST', '/api/v1/upload', fd);
+    r.err = null;
+    r.st.textContent = r.data.duplicate ? '已存在' : '完成';
+    r.st.classList.add('done');
+  } catch (err) {
+    r.err = err;
+    r.st.textContent = err.message;
+    r.st.classList.add('err');
+  }
+}
+
+// 业务错误（格式 / 大小）重试也没用，只重试网络或服务端异常。
+const retryable = (err) => err && !/不支持|超出限制|请选择/.test(err.message) && err.message !== '未登录';
+
 async function uploadAll(files) {
   files = files.filter((f) => f.type.startsWith('image/'));
   if (!files.length) return;
+  const noMark = $('#no-mark').checked;
   const queue = $('#queue');
   const rows = files.map((f) => {
     const st = el('span', { class: 'state', text: '等待中' });
     const li = el('li', {}, el('span', { class: 'name', text: f.name || '粘贴的图片' }), st);
     queue.append(li);
-    return { f, li, st };
+    return { f, li, st, data: null, err: null };
   });
-  const copyKind = localStorage.getItem('copyDefault') || '';
-  const results = [];
-  for (const r of rows) {
-    r.st.textContent = '上传中…';
-    const fd = new FormData();
-    fd.append('file', r.f, r.f.name || 'paste.png');
-    try {
-      const data = await api('POST', '/api/v1/upload', fd);
-      r.st.textContent = data.duplicate ? '已存在' : '完成';
-      r.st.classList.add('done');
-      if (copyKind) results.push(data.links[copyKind]);
-    } catch (err) {
-      r.st.textContent = err.message;
-      r.st.classList.add('err');
-    }
+  // 先 2 路并发；失败的再逐张重试一遍（并发出错时回退为串行）。
+  let next = 0;
+  const worker = async () => {
+    while (next < rows.length) await uploadOne(rows[next++], noMark);
+  };
+  await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, rows.length) }, worker));
+  for (const r of rows.filter((x) => retryable(x.err))) {
+    r.st.textContent = '重试中…';
+    await uploadOne(r, noMark);
   }
+  const copyKind = localStorage.getItem('copyDefault') || '';
+  const results = copyKind ? rows.filter((r) => r.data).map((r) => r.data.links[copyKind]) : [];
   if (results.length) copy(results.join('\n'));
   reload();
   setTimeout(() => rows.forEach((r) => {
-    if (r.st.classList.contains('err')) return;
+    if (r.err) return;
     r.li.classList.add('leaving');
     setTimeout(() => r.li.remove(), 320);
   }), 4000);
@@ -663,8 +694,35 @@ function openDetail(item) {
   ];
   $('#d-meta').replaceChildren(...meta.flatMap(([k, v]) => [el('dt', { text: k }), el('dd', { text: v })]));
   $('#d-links').replaceChildren(...KINDS.map(([kind, label]) => linkRow(label.replace('Markdown', 'MD'), linkOf(item, kind))));
+  const mark = $('#d-mark');
+  mark.checked = item.watermark !== false;
+  mark.disabled = item.extension === 'gif';
+  mark.parentElement.title = mark.disabled ? 'GIF 没有 WebP 衍生图' : '';
   $('#detail').showModal();
 }
+
+$('#d-mark').addEventListener('change', async (e) => {
+  const item = state.current;
+  if (!item) return;
+  const on = e.target.checked;
+  e.target.disabled = true;
+  try {
+    const data = await api('POST', `/api/admin/images/${encodeURIComponent(item.key)}/watermark`, { watermark: String(on) });
+    item.watermark = data.watermark;
+    item.webp_size = data.webp_size;
+    // 衍生图 URL 不变，加时间戳绕开浏览器缓存刷新预览与网格。
+    const bust = `${item.links.webp}${item.links.webp.includes('?') ? '&' : '?'}t=${Date.now()}`;
+    $('#d-img').src = bust;
+    const li = document.querySelector(`#grid li[data-key="${CSS.escape(item.key)}"] img`);
+    if (li) li.src = bust;
+    toast(on ? '已加水印（CDN 可能仍缓存旧图）' : '已去掉水印（CDN 可能仍缓存旧图）');
+  } catch (err) {
+    e.target.checked = !on;
+    toast(err.message);
+  } finally {
+    e.target.disabled = false;
+  }
+});
 
 $('#d-download').addEventListener('click', () => state.current && download([state.current.key], 'original'));
 $('#d-delete').addEventListener('click', async () => {
@@ -710,7 +768,225 @@ async function loadTokens() {
 $('#btn-settings').addEventListener('click', async () => {
   $('#token-new').hidden = true;
   $('#settings').showModal();
-  try { await loadTokens(); } catch (err) { toast(err.message); }
+  try {
+    await Promise.all([loadTokens(), loadSettings()]);
+  } catch (err) { toast(err.message); }
+});
+
+// ---------- 设置：分页签 ----------
+
+const TABS = $$('#settings [role="tab"]');
+function selectTab(tab) {
+  TABS.forEach((t) => {
+    const on = t === tab;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(`#${t.getAttribute('aria-controls')}`).hidden = !on;
+  });
+  if (tab.id === 'tab-mark') schedulePreview();
+  if (tab.id === 'tab-advanced') pollRegen();
+}
+TABS.forEach((t, i) => {
+  t.addEventListener('click', () => selectTab(t));
+  t.addEventListener('keydown', (e) => {
+    const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    const n = TABS[(i + d + TABS.length) % TABS.length];
+    n.focus();
+    selectTab(n);
+  });
+});
+
+// ---------- 设置：服务端参数 ----------
+
+let srv = null; // { settings, defaults, custom_font, has_icon }
+
+// 表单字段名形如 "watermark.opacity"，按路径读写嵌套对象。
+const getPath = (o, path) => path.split('.').reduce((x, k) => x?.[k], o);
+function setPath(o, path, v) {
+  const ks = path.split('.');
+  const last = ks.pop();
+  ks.reduce((x, k) => x[k], o)[last] = v;
+}
+
+function fillForm(form, st) {
+  for (const input of form.elements) {
+    if (!input.name) continue;
+    const v = getPath(st, input.name);
+    if (input.type === 'checkbox') input.checked = !!v;
+    else input.value = v ?? '';
+  }
+  form.querySelectorAll('output[data-for]').forEach(renderOutput);
+}
+
+function readForm(form, st) {
+  const out = structuredClone(st);
+  for (const input of form.elements) {
+    if (!input.name) continue;
+    let v = input.type === 'checkbox' ? input.checked : input.value;
+    if (input.type === 'number' || input.type === 'range') v = Number(v);
+    setPath(out, input.name, v);
+  }
+  return out;
+}
+
+function renderOutput(o) {
+  const v = Number($(`#mark-form [name="${o.dataset.for}"]`).value);
+  o.textContent = o.dataset.for.endsWith('opacity') ? `${Math.round(v * 100)}%` : `${v}%`;
+}
+
+function renderAssets() {
+  const icon = $('#icon-img');
+  icon.hidden = !srv.has_icon;
+  if (srv.has_icon) icon.src = `/api/admin/assets/icon?t=${Date.now()}`;
+  $('#icon-state').textContent = srv.has_icon ? '' : '未上传图标';
+  $('#icon-del').hidden = !srv.has_icon;
+  $('#font-state').textContent = srv.custom_font ? '使用自定义字体' : '使用内嵌字体（思源黑体常用字）';
+  $('#font-del').hidden = !srv.custom_font;
+}
+
+function applyServer(data) {
+  srv = data;
+  fillForm($('#mark-form'), srv.settings);
+  fillForm($('#adv-form'), srv.settings);
+  $$('#adv-form [data-rec]').forEach((x) => {
+    x.textContent = `（推荐 ${srv.defaults[x.dataset.rec].toLocaleString('zh-CN')}）`;
+  });
+  renderAssets();
+}
+
+async function loadSettings() {
+  applyServer(await api('GET', '/api/admin/settings'));
+  if (!$('#pane-mark').hidden) schedulePreview();
+}
+
+async function saveSettings(st, form) {
+  const btn = form.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    applyServer(await api('PUT', '/api/admin/settings', st));
+    toast('已保存');
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('#mark-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  saveSettings(readForm($('#mark-form'), srv.settings), e.target);
+});
+$('#adv-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (!e.target.reportValidity()) return;
+  saveSettings(readForm($('#adv-form'), srv.settings), e.target);
+});
+$('#adv-reset').addEventListener('click', () => {
+  // 只把高级页的数值恢复推荐值，邮箱保持不变；需点保存才生效。
+  const st = readForm($('#adv-form'), srv.settings);
+  for (const k of ['webp_quality', 'webp_max_edge', 'max_size_mb', 'max_pixels']) st[k] = srv.defaults[k];
+  fillForm($('#adv-form'), st);
+  toast('已填入推荐值，点保存生效');
+});
+
+// 预览：参数变动后 300ms 请求一次，旧请求的结果丢弃。
+let previewTimer;
+let previewSeq = 0;
+let previewURL = null;
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(renderPreview, 300);
+}
+async function renderPreview() {
+  if (!srv) return;
+  const seq = ++previewSeq;
+  const st = readForm($('#mark-form'), srv.settings);
+  try {
+    const res = await fetch('/api/admin/settings/preview', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'image/webp,application/json' },
+      body: JSON.stringify({ settings: st, key: $('#preview-key').value.trim() }),
+    });
+    if (seq !== previewSeq) return;
+    if (!res.headers.get('Content-Type')?.startsWith('image/')) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.message || '预览失败');
+    }
+    const url = URL.createObjectURL(await res.blob());
+    if (previewURL) URL.revokeObjectURL(previewURL);
+    previewURL = url;
+    $('#mark-preview').src = url;
+  } catch (err) {
+    if (seq === previewSeq) toast(err.message);
+  }
+}
+$('#mark-form').addEventListener('input', (e) => {
+  if (e.target.type === 'range') renderOutput($(`#mark-form output[data-for="${e.target.name}"]`));
+  schedulePreview();
+});
+$('#preview-key').addEventListener('input', schedulePreview);
+
+// 图标 / 字体上传
+async function uploadAsset(name, file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    applyServer(await api('POST', `/api/admin/assets/${name}`, fd));
+    toast('已上传');
+    schedulePreview();
+  } catch (err) { toast(err.message); }
+}
+async function deleteAsset(name) {
+  try {
+    applyServer(await api('DELETE', `/api/admin/assets/${name}`));
+    schedulePreview();
+  } catch (err) { toast(err.message); }
+}
+for (const name of ['icon', 'font']) {
+  const input = $(`#${name}-file`);
+  $(`#${name}-pick`).addEventListener('click', () => input.click());
+  input.addEventListener('change', () => {
+    if (input.files[0]) uploadAsset(name, input.files[0]);
+    input.value = '';
+  });
+  $(`#${name}-del`).addEventListener('click', () => deleteAsset(name));
+}
+
+// 全量重建
+let regenTimer;
+function renderRegen(j) {
+  const bar = $('#regen-bar');
+  $('#regen-start').disabled = j.running;
+  bar.hidden = !j.running;
+  if (j.running) {
+    bar.max = j.total || 1;
+    bar.value = j.done;
+    $('#regen-state').textContent = `进行中 ${j.done} / ${j.total}`;
+  } else if (j.ended) {
+    $('#regen-state').textContent = j.error
+      ? `出错：${j.error}`
+      : `上次完成于 ${fmtTime(j.ended)}，处理 ${j.ok} 张`;
+  } else {
+    $('#regen-state').textContent = '';
+  }
+}
+async function pollRegen() {
+  clearTimeout(regenTimer);
+  try {
+    const j = await api('GET', '/api/admin/regen');
+    renderRegen(j);
+    if (j.running && $('#settings').open) regenTimer = setTimeout(pollRegen, 1000);
+  } catch (err) { toast(err.message); }
+}
+$('#regen-start').addEventListener('click', async () => {
+  if (!confirm('按当前设置重建全部 WebP 衍生图？图片多时需要几分钟，期间可正常使用。')) return;
+  try {
+    renderRegen(await api('POST', '/api/admin/regen', { all: 'true' }));
+    pollRegen();
+  } catch (err) { toast(err.message); }
 });
 
 $('#token-form').addEventListener('submit', async (e) => {

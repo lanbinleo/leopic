@@ -12,7 +12,7 @@ services:
       # 后台隐藏：未通过安全地址解锁时，页面与 API 一律 301 过去
       LEOPIC_ADMIN_PATH: ${LEOPIC_ADMIN_PATH:-}
       LEOPIC_ADMIN_REDIRECT: ${LEOPIC_ADMIN_REDIRECT:-}
-      # LEOPIC_EMAIL: you@example.com   # 设置后 POST /api/v1/tokens 要求 email 匹配
+      # 质量、上传上限、邮箱、水印等在管理页「设置」里改（存库），不再用环境变量
     volumes:
       # OpenResty 容器只挂载 /opt/1panel/www，静态目录必须在 www 树内（部署便签 §3.2）
       - /opt/1panel/apps/imgbed/data:/data

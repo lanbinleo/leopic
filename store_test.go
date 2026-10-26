@@ -15,15 +15,21 @@ func testStore(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &Config{
-		Uploads: filepath.Join(dir, "uploads"), WebpDir: filepath.Join(dir, "webp"),
-		MaxSize: 10 << 20, MaxPixels: 50_000_000, WebpQuality: 82, WebpMaxEdge: 64,
+		Uploads: filepath.Join(dir, "uploads"), WebpDir: filepath.Join(dir, "webp"), Assets: filepath.Join(dir, "assets"),
 	}
 	db, err := openDB(filepath.Join(dir, "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &Store{cfg: cfg, db: db}
+	s := &Store{cfg: cfg, db: db}
+	st := defaultSettings()
+	st.WebpMaxEdge = 64
+	if err := s.saveSettings(st); err != nil {
+		t.Fatal(err)
+	}
+	s.loadAssets()
+	return s
 }
 
 func pngBytes(w, h int, c uint8) []byte {

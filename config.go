@@ -9,22 +9,20 @@ import (
 	"strings"
 )
 
+// Config 只放启动前必须确定、改错会锁死后台或断链的项。
+// 图片质量、上传上限、水印等可调参数在管理页设置（见 settings.go）。
 type Config struct {
 	Addr          string
 	Uploads       string
 	WebpDir       string
+	Assets        string
 	DB            string
 	BaseURL       string
 	ImgPrefix     string
 	WebpPrefix    string
 	Password      string
-	Email         string
 	AdminPath     string
 	AdminRedirect string
-	MaxSize       int64
-	MaxPixels     int
-	WebpQuality   int
-	WebpMaxEdge   int
 }
 
 func env(key, def string) string {
@@ -56,31 +54,17 @@ func loadConfig() (*Config, error) {
 		Addr:       env("LEOPIC_ADDR", ":8080"),
 		Uploads:    env("LEOPIC_UPLOADS", filepath.Join(data, "uploads")),
 		WebpDir:    env("LEOPIC_WEBP_DIR", filepath.Join(data, "webp")),
+		Assets:     env("LEOPIC_ASSETS_DIR", filepath.Join(data, "assets")),
 		DB:         env("LEOPIC_DB", filepath.Join(data, "leopic.db")),
 		BaseURL:    strings.TrimRight(env("LEOPIC_BASE_URL", ""), "/"),
 		ImgPrefix:  prefix(env("LEOPIC_IMG_PREFIX", "/img")),
 		WebpPrefix: prefix(env("LEOPIC_WEBP_PREFIX", "/webp")),
 		Password:   os.Getenv("LEOPIC_PASSWORD"),
-		Email:      env("LEOPIC_EMAIL", ""),
 	}
 	if ap := env("LEOPIC_ADMIN_PATH", ""); ap != "" {
 		c.AdminPath = prefix(ap)
 	}
 	c.AdminRedirect = env("LEOPIC_ADMIN_REDIRECT", "")
-	maxMB, err := envInt("LEOPIC_MAX_SIZE_MB", 50)
-	if err != nil {
-		return nil, err
-	}
-	c.MaxSize = int64(maxMB) << 20
-	if c.MaxPixels, err = envInt("LEOPIC_MAX_PIXELS", 50_000_000); err != nil {
-		return nil, err
-	}
-	if c.WebpQuality, err = envInt("LEOPIC_WEBP_QUALITY", 82); err != nil {
-		return nil, err
-	}
-	if c.WebpMaxEdge, err = envInt("LEOPIC_WEBP_MAX_EDGE", 2560); err != nil {
-		return nil, err
-	}
 	return c, nil
 }
 

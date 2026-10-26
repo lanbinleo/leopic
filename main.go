@@ -15,7 +15,7 @@ const usage = `用法:
   leopic serve                                   启动服务（默认）
   leopic import --lsky-db FILE [--dry-run] [--no-orphans]
                  [--drop-compressed] [--redirect-map FILE]
-  leopic regen [--all]                           补生成 / 重建 WebP 衍生图
+  leopic regen [--all]                           补生成 / 重建 WebP 衍生图（按管理页的水印与质量设置）
   leopic token create [NAME]                     新建 API token
 `
 
@@ -46,6 +46,10 @@ func run(args []string) error {
 	}
 	defer db.Close()
 	store := &Store{cfg: cfg, db: db}
+	if err := store.loadSettings(); err != nil {
+		return err
+	}
+	store.loadAssets()
 
 	switch cmd {
 	case "serve":
@@ -83,7 +87,7 @@ func run(args []string) error {
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
-		n, err := store.regen(*all)
+		n, err := store.regen(*all, nil)
 		fmt.Printf("处理 %d 张\n", n)
 		return err
 
